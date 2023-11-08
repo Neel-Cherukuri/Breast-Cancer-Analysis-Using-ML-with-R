@@ -1,0 +1,210 @@
+---
+title: "Untitled"
+author: "Neelima"
+date: "2023-04-23"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(pROC)
+library(corrplot)
+library(ggplot2)
+library(Hmisc)
+library(randomForest)
+library(gbm)
+library(nnet)
+library(rpart)
+library(rpart.plot)
+library(kknn)
+library(cluster)
+library(mice)
+library(readr)
+library(e1071)
+library(lme4)
+library(caretEnsemble)
+library(skimr)
+library(plotly)
+library(table1)
+library(mboost)
+library(MLmetrics)
+library(parallel)
+library(iterators)
+library(DT)
+library(foreach)
+library(gganimate)
+library(gifski)
+library(formatR)
+library(gridExtra)
+library(grid)
+library(vcd)
+library(knitr)
+library(corrplot)
+library(ggcorrplot)
+library(scales)
+library(ROCR)
+library(PRROC)
+```
+# Introduction
+Breast cancer is one of the most common cancers among women worldwide, affecting millions of women each year. This project aims to analyze a dataset containing information about breast cancer tumors to build predictive models that can classify tumors as benign or malignant.
+
+#Data Loading
+```{r}
+url <- "https://drive.google.com/uc?id=1fgt_sIS2V6COS_E-I6n-wx7UTG5taCsz"
+breast_cancer <- read.csv(url)
+```
+
+#Data Exploration
+```{r}
+# Summary and class type for each column
+summary(breast_cancer)
+sapply(breast_cancer, class)
+# Scatter plot for radius mean and texture mean
+plot(breast_cancer$radius_mean, breast_cancer$texture_mean, 
+     main = "Scatter plot of Radius Mean and Texture Mean",
+     xlab = "Radius Mean", ylab = "Texture Mean")
+# Histograms for each continuous variable
+par(mfrow=c(5,6), mar=c(1,1,1,1))
+for (i in which(sapply(breast_cancer, is.numeric))) {
+  hist(breast_cancer[,i], main=colnames(breast_cancer)[i], col="lightblue")
+}
+# Box plot for each numeric variable
+for (col in which(sapply(breast_cancer, is.numeric))) {
+  boxplot(breast_cancer[[col]], main = paste("Box plot of", col), ylab = col, col = "lightblue")
+  outliers <- boxplot.stats(breast_cancer[[col]])$out
+  if (length(outliers) > 0) {
+    points(rep(1, length(outliers)), outliers, col = "red", pch = 16)
+  }
+}
+# Correlation matrix
+correlation_matrix <- cor(breast_cancer[, sapply(breast_cancer, is.numeric)], use="pairwise.complete.obs")
+corrplot(correlation_matrix, method="circle")
+
+```
+# Data Preparation
+```{r}
+data <- breast_cancer %>%
+  select(-id) %>%
+  mutate(diagnosis = factor(ifelse(diagnosis == "B", "Benign", "Malignant")))
+
+sum(is.na(data)) # Checking for missing values
+
+# Normalize the data excluding the target variable
+data_normalized <- as.data.frame(scale(data %>% select(-diagnosis))) # Scale only numeric predictors
+data_normalized$diagnosis <- data$diagnosis # Add the diagnosis factor column back in after scaling
+
+
+
+```
+# Data Modeling
+```{r}
+# Data Modeling - Train models
+
+# Set the seed for reproducibility
+set.seed(123)
+
+# Create a partition to split the data into training and testing sets
+train_index <- createDataPartition(data_normalized$diagnosis, p = 0.75, list = FALSE)
+train_data <- data_normalized[train_index, ]
+test_data <- data_normalized[-train_index, ]
+
+# Train a Random Forest model
+library(randomForest)
+model_rf <- randomForest(diagnosis ~ ., data = train_data, ntree=500, mtry=2, importance=TRUE)
+
+# Generalized Linear Model via glmnet
+# Prepare matrix for glmnet with the response variable 'diagnosis'
+x_train <- model.matrix(diagnosis ~ . - 1, data = train_data) # Removing the intercept term
+y_train <- ifelse(train_data$diagnosis == "Malignant", 1, 0)  # Convert to binary outcomes
+x_test <- model.matrix(diagnosis ~ . - 1, data = test_data) # Test data for prediction phase
+
+# Fit the model using glmnet with cross-validation to select lambda
+library(glmnet)
+cv_fit <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 1) # Lasso penalty
+
+# Fit the final model using the lambda that minimized cross-validation error
+final_model_glmnet <- glmnet(x_train, y_train, family = "binomial", alpha = 1, lambda = cv_fit$lambda.min)
+
+# Gradient Boosting Machine model with caret for parameter tuning and cross-validation
+library(gbm)
+set.seed(123) # Resetting seed for reproducibility with GBM
+train_control <- trainControl(method = "repeatedcv", number = 10, repeats = 3, search = "grid")
+model_gbm <- train(diagnosis ~ ., data = train_data, method = "gbm", trControl = train_control, 
+                   verbose = FALSE, tuneLength = 5)
+
+```
+
+#Model Evaluation
+```{r}
+# Predict and evaluate the Random Forest model
+predictions_rf <- predict(model_rf, newdata = test_data)
+confusion_rf <- confusionMatrix(predictions_rf, test_data$diagnosis)
+
+# Predict and evaluate the glmnet model (need to make predictions on the test set)
+predictions_glmnet_prob <- predict(final_model_glmnet, newx = x_test, type = "response")
+predictions_glmnet <- ifelse(predictions_glmnet_prob > 0.5, "Malignant", "Benign")
+predictions_glmnet_factor <- factor(predictions_glmnet, levels = levels(train_data$diagnosis))
+confusion_glmnet <- confusionMatrix(predictions_glmnet_factor, test_data$diagnosis)
+
+# Predict and evaluate the GBM model
+predictions_gbm <- predict(model_gbm, newdata = test_data, type = "raw")
+confusion_gbm <- confusionMatrix(predictions_gbm, test_data$diagnosis)
+
+# Performance summaries
+rf_summary <- summary(confusion_rf)
+glmnet_summary <- summary(confusion_glmnet)
+gbm_summary <- summary(confusion_gbm)
+
+# Calculate ROC for Random Forest
+rf_roc <- roc(response = test_data$diagnosis, predictor = as.numeric(predictions_rf == "Malignant"))
+
+# Calculate ROC for GLMNET
+glmnet_roc <- roc(response = test_data$diagnosis, predictor = predictions_glmnet_prob)
+
+# Calculate ROC for GBM
+gbm_probs <- predict(model_gbm, newdata = test_data, type = "prob")
+gbm_roc <- roc(response = test_data$diagnosis, predictor = gbm_probs[, "Malignant"])
+
+# Plot ROC Curves
+plot(rf_roc, print.auc = TRUE, main="ROC Curves Comparison")
+lines(glmnet_roc, col = "red", print.auc = TRUE)
+lines(gbm_roc, col = "blue", print.auc = TRUE)
+legend("bottomright", legend = c("Random Forest", "GLMNET", "GBM"), 
+       col = c("black", "red", "blue"), lwd = 2)
+
+# Variable Importance for Random Forest (if deemed necessary)
+varImpPlot(model_rf)
+
+
+# Extract accuracy value from confusion matrix
+rf_accuracy <- confusion_rf$overall["Accuracy"]
+glmnet_accuracy <- confusion_glmnet$overall["Accuracy"]
+gbm_accuracy <- confusion_gbm$overall["Accuracy"]
+
+# Create a data frame to compare accuracies
+accuracy_df <- data.frame(
+  Model = c("Random Forest", "GLMNET", "GBM"),
+  Accuracy = c(rf_accuracy, glmnet_accuracy, gbm_accuracy)
+)
+
+# Print the accuracy values
+print(accuracy_df)
+
+# Find the model with the highest accuracy
+best_model <- accuracy_df[which.max(accuracy_df$Accuracy), ]
+
+# Print the best model
+cat("The model with the highest accuracy is:", best_model$Model)
+cat("Accuracy:", best_model$Accuracy)
+
+
+```
+
+# Conclusion
+This report provided an analysis of a breast cancer dataset with the aim of predicting cancer malignancy. The GBM model demonstrated good performance in classification tasks, and the evaluation metrics support its reliability as a predictive model.
